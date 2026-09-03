@@ -1,107 +1,116 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { fetchReviewQueue } from "@/lib/api";
+import type { ReviewQueueItem } from "@/lib/types";
+import { QUESTION_TYPE_LABELS } from "@/lib/types";
 
-/**
- * ローカル環境の疎通確認用の画面。
- *
- * ここで確認していること（LOCAL_DEV.md §13-3 / §13-12）:
- *   - ホストで動く next dev（コンテナ外）から、compose の api コンテナに届くか
- *   - ブラウザから見た API の URL が NEXT_PUBLIC_API_BASE_URL で正しく渡っているか
- *
- * fetch はサーバ側ではなく**ブラウザから**行う。API のベース URL は
- * compose のサービス名 "api" ではなくホスト側ポート（http://localhost:8080）であり、
- * これはブラウザから見た URL だから（LOCAL_DEV.md §4.2）。
- *
- * レビュー画面の本体（needs_review の問題を承認する UI）は Phase 3 で実装する。
- */
-
-type SkillNode = {
-  id: number;
-  slug: string;
-  name: string;
-  difficulty: number;
-};
-
-type Skill = {
-  id: number;
-  slug: string;
-  name: string;
-  description?: string;
-  nodes?: SkillNode[];
-};
-
-const apiBaseUrl =
-  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
-
-export default function Home() {
-  const [skills, setSkills] = useState<Skill[] | null>(null);
+export default function ReviewQueuePage() {
+  const [items, setItems] = useState<ReviewQueueItem[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let aborted = false;
-
-    fetch(`${apiBaseUrl}/v1/skills`)
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error(`API が ${res.status} を返しました`);
-        }
-        return (await res.json()) as { skills: Skill[] };
-      })
-      .then((data) => {
-        if (!aborted) setSkills(data.skills ?? []);
-      })
-      .catch((e: unknown) => {
-        if (!aborted) setError(e instanceof Error ? e.message : String(e));
-      });
-
-    return () => {
-      aborted = true;
-    };
+  const load = useCallback(async (cursor?: string) => {
+    try {
+      const data = await fetchReviewQueue(cursor);
+      if (cursor) {
+        setItems((prev) => [...prev, ...data.items]);
+      } else {
+        setItems(data.items);
+      }
+      setNextCursor(data.next_cursor);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    load().finally(() => setLoading(false));
+  }, [load]);
+
+  const handleLoadMore = async () => {
+    if (!nextCursor) return;
+    setLoadingMore(true);
+    await load(nextCursor);
+    setLoadingMore(false);
+  };
 
   return (
     <>
-      <h1>スキルツリー</h1>
-      <p className="muted">
-        接続先: <code>{apiBaseUrl}</code>
-      </p>
+      <div className="page-header">
+        <h1>レビューキュー</h1>
+        <Link href="/questions" className="btn btn-secondary">
+          問題一覧
+        </Link>
+      </div>
 
       {error && (
         <div className="error">
           <p>
-            <strong>API に接続できませんでした:</strong> {error}
+            <strong>エラー:</strong> {error}
           </p>
           <p className="muted">
-            <code>make up-product</code> で api が起動しているか、
-            <code>curl {apiBaseUrl}/healthz</code> が通るかを確認してください。
+            <code>docker compose up -d</code> で API
+            が起動しているか確認してください。
           </p>
         </div>
       )}
 
-      {!error && skills === null && <p className="muted">読み込み中…</p>}
+      {loading && <p className="muted">読み込み中…</p>}
 
-      {skills?.length === 0 && (
-        <p className="muted">
-          スキルがありません。<code>make seed</code> でシードを投入してください。
-        </p>
+      {!loading && !error && items.length === 0 && (
+        <div className="empty-state">
+          <p>レビュー待ちの問題はありません</p>
+          <p className="muted">
+            すべての問題がレビュー済みです。
+            <Link href="/questions">問題一覧</Link>
+            で確認できます。
+          </p>
+        </div>
       )}
 
-      {skills?.map((skill) => (
-        <section className="card" key={skill.id}>
-          <h2>
-            {skill.name} <span className="muted">({skill.slug})</span>
-          </h2>
-          {skill.description && <p className="muted">{skill.description}</p>}
-          <ul className="nodes">
-            {(skill.nodes ?? []).map((node) => (
-              <li key={node.id}>
-                {node.name} <span className="muted">難易度 {node.difficulty}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ))}
+      {items.length > 0 && (
+        <div className="queue-list">
+          {items.map((item) => (
+            <Link
+              key={item.review_id}
+              href={`/questions/${item.question_id}`}
+              className="queue-item"
+            >
+              <div className="queue-item-main">
+                <span className="queue-item-title">{item.title}</span>
+                <div className="queue-item-meta">
+                  <span className="tag tag-type">
+                    {QUESTION_TYPE_LABELS[item.type]}
+                  </span>
+                  <span className="tag tag-difficulty">
+                    難易度 {item.difficulty}
+                  </span>
+                </div>
+              </div>
+              <time className="queue-item-date" dateTime={item.queued_at}>
+                {new Date(item.queued_at).toLocaleDateString("ja-JP")}
+              </time>
+            </Link>
+          ))}
+        </div>
+      )}
+
+      {nextCursor && (
+        <div className="load-more">
+          <button
+            className="btn btn-secondary"
+            onClick={handleLoadMore}
+            disabled={loadingMore}
+          >
+            {loadingMore ? "読み込み中…" : "さらに読み込む"}
+          </button>
+        </div>
+      )}
     </>
   );
 }
